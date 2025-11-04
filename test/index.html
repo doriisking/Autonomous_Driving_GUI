@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>FastAPI GPS + Camera Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet"
+        href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body { margin: 0; font-family: sans-serif; }
+    .container { display: flex; height: 100vh; }
+    #mapPane { flex: 5; position: relative; }
+    #map { width: 100%; height: 100%; }
+    #cameraPane { flex: 5; background: #000; display: flex;
+                  align-items: center; justify-content: center; }
+    #camView { width: 100%; object-fit: contain; }
+    #status { position: absolute; top: 10px; left: 10px;
+              background: rgba(255,255,255,0.8); padding: 8px;
+              border-radius: 8px; font-size: 0.8rem; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div id="mapPane">
+      <div id="status">Waiting for GPS...</div>
+      <div id="map"></div>
+    </div>
+    <div id="cameraPane">
+      <img id="camView" src="/camera" alt="Camera Stream">
+    </div>
+  </div>
+
+<script>
+const map = L.map('map').setView([37.5665, 126.9780], 16);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19
+}).addTo(map);
+
+let marker = null;
+const status = document.getElementById("status");
+const evt = new EventSource("/gps");
+evt.onmessage = e => {
+  const d = JSON.parse(e.data);
+  const latlng = [d.lat, d.lon];
+  if (!marker) {
+    marker = L.marker(latlng).addTo(map);
+  } else {
+    marker.setLatLng(latlng);
+  }
+  map.panTo(latlng);
+  status.innerText =
+    `lat: ${d.lat.toFixed(6)} | lon: ${d.lon.toFixed(6)} | heading: ${d.heading.toFixed(1)}°`;
+};
+</script>
+</body>
+</html>
