@@ -18,20 +18,22 @@ dependence:
   - nav_utils (EARTH_R, haversine_xy, normalize, LinearPath, load_all_paths 등)
   - python-dotenv (선택)
 """
-
-
-
 from __future__ import annotations
 import os, math, time, threading, socket, base64
 from datetime import datetime
 from typing import Optional, Tuple
 from queue import Queue
+import json
 import csv
 from pathlib import Path
 LOG_CSV = os.getenv("LOG_CSV", f"log_{int(time.time())}.csv")
+import redis, json, time
+r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+
 
 # ---------- 설정 ----------
-SERIAL_PORT = os.getenv("GPS_SERIAL", "/dev/gps")
+#SERIAL_PORT = os.getenv("GPS_SERIAL", "/dev/gps")
+SERIAL_PORT = os.getenv("GPS_SERIAL", "/dev/tty.usbmodem101")
 SERIAL_BAUD = int(os.getenv("GPS_BAUD", "115200"))
 GO2_TOPIC   = os.getenv("GO2_TOPIC", "/sportmodestate")
 CMD_TOPIC   = os.getenv("CMD_TOPIC", "/cmd_vel")
@@ -50,8 +52,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import qos_profile_sensor_data
-from unitree_go.msg import SportModeState
-from geometry_msgs.msg import Twist
+# from unitree_go.msg import SportModeState
+# from geometry_msgs.msg import Twist
 
 # ---------- GPS 파서 ----------
 from pyubx2 import UBXReader, UBXMessage, SET
@@ -780,7 +782,28 @@ def control_thread(rate=10.0):
                     log_file.flush()
                 except Exception as e:
                     # 로깅 실패가 제어를 멈추지 않도록 함
+                    print(f"[Log] CSV logging error: {e}")
                     pass
+                    # ✅ Redis에 실시간 GPS 상태 전송
+                try:
+                    state = {
+                            "gps": {"lat": lat, "lon": lon},
+                            "heading": {"global": global_heading, "yaw_offset": yaw_offset},
+                            "odom": {"x": x, "y": y, "yaw_deg": yaw_deg},
+                            "timestamp": time.time()
+                        }
+
+                     # JSON 문자열로 변환 후 Redis에 저장
+                    #r.set("gps_state", json.dumps(state))
+                    r.set("gps_state", json.dumps({"gps":{"lat":37.1,"lon":127.1}}))
+                    print(r.get("gps_state"))
+                    # 디버깅용 로그 (선택)
+                    print(f"[Redis] gps_state updated: {state['gps']}")         
+                except Exception as e:
+                    print(f"[Redis] GPS state update failed: {e}")
+
+
+
 
                 # Send command
                 ctrl_msg = f"Move({vx:.2f}, {vy:.2f}, {vyaw:.2f})"
