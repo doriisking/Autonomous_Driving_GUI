@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <title>Robot Navigation Dashboard</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: #1e1e1e;
+      color: #ddd;
+      font-family: sans-serif;
+      overflow: hidden;
+    }
+
+    .container {
+      height: 100%;
+    }
+
+    /* 지도 Pane만 남김 */
+    #mapPane {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      background: #111;
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    #gpsBox {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0,0,0,0.5);
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 0.8rem;
+      color: #fff;
+      line-height: 1.3;
+      z-index: 1000;
+    }
+
+    #headingText {
+      position: absolute;
+      bottom: 5px;
+      right: 10px;
+      font-size: 0.9rem;
+      color: #0f0;
+      z-index: 1000;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div id="mapPane">
+      <div id="map"></div>
+
+      <div id="headingText">Heading: 0°</div>
+
+      <div id="gpsBox">
+        <div>📍 <b>Lat:</b> <span id="latVal">-</span></div>
+        <div>📍 <b>Lon:</b> <span id="lonVal">-</span></div>
+        <div>🧭 <b>Heading:</b> <span id="headVal">0°</span></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  /* -------------------------------
+   * 지도 초기화
+   * ------------------------------- */
+  const map = L.map('map').setView([37.40123, 127.10345], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 22,
+    attribution: '© OpenStreetMap'
+  }).addTo(map);
+
+  let pathLine = null;
+  let robotMarker = null;
+
+  async function loadPath() {
+    const res = await fetch("/selected_path");
+    const data = await res.json();
+    if (!data.coords || data.coords.length === 0) return;
+
+    const latlngs = data.coords.map(c => L.latLng(c[0], c[1]));
+    if (pathLine) map.removeLayer(pathLine);
+    pathLine = L.polyline(latlngs, { color: 'deepskyblue', weight: 4 }).addTo(map);
+
+    L.marker(latlngs[0]).addTo(map).bindPopup("Start");
+    L.marker(latlngs[latlngs.length - 1]).addTo(map).bindPopup("Goal");
+
+    map.fitBounds(pathLine.getBounds());
+  }
+
+  /* -------------------------------
+   * GPS SSE
+   * ------------------------------- */
+  const gpsSource = new EventSource("/gps_stream");
+
+  gpsSource.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    if (!data || !data.gps) return;
+
+    const lat = data.gps.lat;
+    const lon = data.gps.lon;
+
+    document.getElementById("latVal").innerText = lat.toFixed(7);
+    document.getElementById("lonVal").innerText = lon.toFixed(7);
+
+    // Robot Marker
+    if (robotMarker) robotMarker.setLatLng([lat, lon]);
+    else {
+      robotMarker = L.circleMarker([lat, lon], {
+        radius: 6,
+        color: 'red',
+        fillColor: 'red',
+        fillOpacity: 0.9,
+        weight: 1
+      }).addTo(map);
+    }
+  };
+
+  gpsSource.onerror = (err) => console.error("GPS stream error:", err);
+
+  loadPath();
+  </script>
+</body>
+</html>

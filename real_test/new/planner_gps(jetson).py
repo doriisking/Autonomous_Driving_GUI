@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-planner_gps.py
-----------------
-단독 GPS 수신 모듈 (UBX + NMEA 통합) → Redis JSON publish
-
-- UBlox GNSS 수신기에서 lat/lon 데이터를 실시간으로 읽어 Redis에 저장
-- 다른 프로세스(web_server.py 등)에서 redis.get("gps_state")로 접근 가능
-- RTK(NTRIP) 옵션 포함 (환경변수로 caster/user/password 지정 시 자동)
-
+planner_gps.py (Linux-safe version)
+----------------------------------
 환경변수:
-    GPS_SERIAL=/dev/tty.usbmodem101
+    GPS_SERIAL=/dev/gps
     GPS_BAUD=115200
     REDIS_HOST=localhost
     REDIS_PORT=6379
@@ -22,17 +16,20 @@ from datetime import datetime
 from queue import Queue
 import redis
 import serial
-from pyubx2 import UBXReader, UBXMessage, SET
+from pyubx2 import UBXReader, UBXMessage
 from pynmeagps.nmeamessage import NMEAMessage
+import csv
+import sys
 
 # ==============================
 # 환경설정
 # ==============================
-SERIAL_PORT = os.getenv("GPS_SERIAL", "/dev/tty.usbmodem101")
+SERIAL_PORT = os.getenv("GPS_SERIAL", "/dev/ttyUSB0")
 SERIAL_BAUD = int(os.getenv("GPS_BAUD", "115200"))
 REDIS_HOST  = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT  = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_KEY   = "gps_state"
+CSV_PATH    = os.path.expanduser("~/gps_log.csv")  # 홈 디렉토리에 저장
 
 # ==============================
 # 전역 변수
@@ -43,6 +40,14 @@ _last_log = 0.0
 
 # Redis 연결
 r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+
+# CSV 파일 준비
+csv_lock = threading.Lock()
+csv_headers = ["timestamp", "lat", "lon"]
+with open(CSV_PATH, "w", newline="") as f:
+    writer = csv.writer(f)
+    writer.writerow(csv_headers)
+print(f"[CSV] Logging to {CSV_PATH}")
 
 # ==============================
 # 헬퍼 함수
@@ -59,54 +64,68 @@ def get_gps():
 def publish_gps(lat, lon):
     """Redis에 현재 lat/lon 상태 전송"""
     try:
-        data = {
-            "gps": {"lat": lat, "lon": lon},
-            "timestamp": time.time()
-        }
+        data = {"gps": {"lat": lat, "lon": lon}, "timestamp": time.time()}
         r.set(REDIS_KEY, json.dumps(data))
     except Exception as e:
         print(f"[Redis] Publish error: {e}")
 
-def make_gga(lat: float, lon: float) -> bytes:
-    """위경도를 받아 NMEA GGA 문장(ASCII byte) 생성 (1 Hz 업링크용)."""
-    t = datetime.utcnow().strftime("%H%M%S.00")
-    lat_d = int(abs(lat)); lat_m = (abs(lat) - lat_d) * 60; lat_dir = 'N' if lat >= 0 else 'S'
-    lon_d = int(abs(lon)); lon_m = (abs(lon) - lon_d) * 60; lon_dir = 'E' if lon >= 0 else 'W'
-    core = (f"GPGGA,{t},{lat_d:02d}{lat_m:07.4f},{lat_dir},"
-            f"{lon_d:03d}{lon_m:07.4f},{lon_dir},1,12,1.0,0.0,M,0.0,M,,")
-    chk = 0
-    for c in core:
-        chk ^= ord(c)
-    return f"${core}*{chk:02X}\r\n".encode('ascii')
+def log_gps(lat, lon):
+    """CSV에 GPS 데이터 기록"""
+    with csv_lock, open(CSV_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([datetime.utcnow().isoformat(), lat, lon])
+
+def add_dash_row():
+    """CSV에 '-' 행 추가"""
+    with csv_lock, open(CSV_PATH, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(['-' for _ in csv_headers])
+    print("[CSV] Added '-' row")
 
 # ==============================
-# GPS 수신 (UBX + NMEA 통합 스레드)
+# 키 입력 스레드
+# ==============================
+def key_listener():
+    print("[Key] Press Enter to add '-' row, or type 'q' + Enter to quit.")
+    while True:
+        try:
+            key = input().strip()
+            if key == "":
+                add_dash_row()
+            elif key.lower() == "q":
+                print("[Key] Quit signal detected.")
+                os._exit(0)
+        except EOFError:
+            break
+
+# ==============================
+# GPS 수신 스레드
 # ==============================
 def gps_thread(ser):
-    """UBlox 수신기에서 UBX/NMEA 통합 처리"""
     global _last_log
-    ubr = UBXReader(ser, protfilter=7)  # 1=UBX, 2=NMEA, 4=RTCM → 7이면 둘 다 허용
+    ubr = UBXReader(ser, protfilter=7)  # UBX + NMEA 허용
     print(f"[GPS] Listening on {ser.port}@{ser.baudrate}")
 
     while True:
         try:
             raw, msg = ubr.read()
+            lat, lon = None, None
 
-            # UBX NAV-PVT (고정밀)
+            # UBX NAV-PVT
             if isinstance(msg, UBXMessage) and msg.identity == 'NAV-PVT':
                 lat = msg.lat * 1e-7
                 lon = msg.lon * 1e-7
-                set_gps(lat, lon)
-                publish_gps(lat, lon)
 
-            # NMEA GGA (보조용)
+            # NMEA GGA
             elif isinstance(msg, NMEAMessage) and msg.identity.endswith("GGA"):
                 lat = float(msg.lat)
                 lon = float(msg.lon)
+
+            if lat is not None and lon is not None:
                 set_gps(lat, lon)
                 publish_gps(lat, lon)
+                log_gps(lat, lon)
 
-            # 로그 출력 (1Hz)
             now = time.time()
             if now - _last_log > 1.0:
                 lat, lon = get_gps()
@@ -124,6 +143,17 @@ def gps_thread(ser):
 # ==============================
 # NTRIP Client (옵션)
 # ==============================
+def make_gga(lat: float, lon: float) -> bytes:
+    """위경도를 받아 NMEA GGA 문장 생성"""
+    t = datetime.utcnow().strftime("%H%M%S.00")
+    lat_d = int(abs(lat)); lat_m = (abs(lat) - lat_d) * 60; lat_dir = 'N' if lat >= 0 else 'S'
+    lon_d = int(abs(lon)); lon_m = (abs(lon) - lon_d) * 60; lon_dir = 'E' if lon >= 0 else 'W'
+    core = (f"GPGGA,{t},{lat_d:02d}{lat_m:07.4f},{lat_dir},"
+            f"{lon_d:03d}{lon_m:07.4f},{lon_dir},1,12,1.0,0.0,M,0.0,M,,")
+    chk = 0
+    for c in core: chk ^= ord(c)
+    return f"${core}*{chk:02X}\r\n".encode('ascii')
+
 def ntrip_thread(caster, port, mountpoint, user, password, ser, init_queue):
     """NTRIP → RTCM 수신 → 시리얼로 전송, 1 Hz로 최신 GGA 업링크"""
     auth = base64.b64encode(f"{user}:{password}".encode()).decode()
@@ -148,8 +178,8 @@ def ntrip_thread(caster, port, mountpoint, user, password, ser, init_queue):
                 buf += sock.recv(1)
             sock.settimeout(1.0)
             last_gga = 0.0
-
             print("[NTRIP] RTCM stream started")
+
             while True:
                 now = time.time()
                 if now - last_gga >= 1.0:
@@ -158,7 +188,6 @@ def ntrip_thread(caster, port, mountpoint, user, password, ser, init_queue):
                         lat, lon = lat_l, lon_l
                     sock.sendall(make_gga(lat, lon))
                     last_gga = now
-
                 try:
                     chunk = sock.recv(1024)
                     if chunk:
@@ -177,6 +206,7 @@ def start_gps():
     print(f"[Main] Serial opened: {SERIAL_PORT}@{SERIAL_BAUD}")
 
     threading.Thread(target=gps_thread, args=(ser,), daemon=True).start()
+    threading.Thread(target=key_listener, daemon=True).start()
 
     # NTRIP 옵션
     caster     = os.getenv('caster')
@@ -187,7 +217,7 @@ def start_gps():
 
     if all([caster, port, mountpoint, user, password]):
         q = Queue(maxsize=2)
-        q.put((37.0, 127.0))  # 초기 dummy 좌표
+        q.put((37.0, 127.0))
         threading.Thread(
             target=ntrip_thread,
             args=(caster, port, mountpoint, user, password, ser, q),
@@ -197,7 +227,7 @@ def start_gps():
         print("[Main] NTRIP not configured; running standalone GPS.")
 
 if __name__ == "__main__":
-    print("[Server] Starting GPS → Redis publisher")
+    print("[Server] Starting GPS → Redis + CSV logger")
     start_gps()
 
     try:

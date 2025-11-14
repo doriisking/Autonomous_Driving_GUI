@@ -221,7 +221,7 @@ class DWACommandNode(Node):
                 if ok:
                     r.set("dist_map_latest", png2.tobytes())
         except Exception as e:
-            self.get_logger().warn(f"[RedisBridge] failed: {e}")
+        self.get_logger().warn(f"[RedisBridge] failed: {e}")
     # ------------------------- 유틸 -------------------------
     def _window_fully_blocked(self, res: float, W: int, H: int, x0: float, y0: float,
                               j0: int, i0: int) -> bool:
